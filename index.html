@@ -3,158 +3,125 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Writing Detector — Pangram Analysis</title>
-  <meta name="description" content="Analyze your writing for AI-generated content using the Pangram API. Identify flagged phrases and track credit usage." />
+  <title>AI Writing Detector</title>
+  <meta name="description" content="Check writing for AI-generated content with Pangram, segment by segment." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Source+Code+Pro:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-  <!-- ═══════════════════ HEADER ═══════════════════ -->
-  <header id="app-header">
-    <div class="header-left">
-      <h1 class="logo">
-        <span class="logo-icon">◉</span>
-        <span class="logo-text">AI Detector</span>
-      </h1>
-    </div>
-    <div class="header-right">
-      <button id="credit-badge" class="credit-badge" title="Credit usage">
-        <span class="credit-icon">⬡</span>
-        <span id="credit-count">0</span>
-        <span class="credit-label">credits used</span>
-      </button>
-      <button id="btn-reset-credits" class="btn-ghost" title="Reset credit counter">↺</button>
-    </div>
-  </header>
+  <div class="page">
+    <header class="masthead">
+      <span class="site-name">AI Writing Detector</span>
+      <span class="divider" aria-hidden="true">/</span>
+      <label class="picker-label">
+        Model
+        <select id="model-picker" class="picker" aria-label="Pangram model"></select>
+      </label>
+      <span id="account" class="account" aria-live="polite"></span>
+    </header>
 
-  <!-- ═══════════════════ MAIN ═══════════════════ -->
-  <main id="app-main">
-    <!-- ─── INPUT PANEL ─── -->
-    <section id="input-panel" class="panel">
-      <div class="panel-header">
-        <h2>Input</h2>
-        <div class="input-meta">
-          <span id="word-count" class="meta-pill">0 words</span>
-          <span id="credit-estimate" class="meta-pill">~0 credits</span>
-        </div>
-      </div>
+    <section id="hero" class="hero" aria-live="polite">
+      <h1 id="headline" class="headline"></h1>
+      <p id="dek" class="dek"></p>
+      <p id="fineprint" class="fineprint"></p>
+    </section>
 
+    <section>
+      <h2 class="section-head">Text</h2>
       <div id="drop-zone" class="drop-zone">
         <textarea
           id="text-input"
-          placeholder="Paste your text here, or drag & drop a .md or .txt file…"
+          aria-label="Text to analyze"
+          placeholder="Paste your writing here, or drop a .md or .txt file."
           spellcheck="false"
         ></textarea>
-        <div id="drop-overlay" class="drop-overlay">
-          <span class="drop-overlay-icon">⤓</span>
-          <span class="drop-overlay-text">Drop file here</span>
-        </div>
+        <div class="drop-overlay">Drop a .md or .txt file</div>
       </div>
-
-      <div class="input-actions">
-        <button id="btn-analyze" class="btn-primary" disabled>
-          <span class="btn-label">Analyze</span>
-          <span class="btn-spinner"></span>
-        </button>
-        <button id="btn-clear" class="btn-ghost">Clear</button>
-      </div>
-    </section>
-
-    <!-- ─── RESULTS PANEL ─── -->
-    <section id="results-panel" class="panel">
-      <div class="panel-header">
-        <h2>Results</h2>
-        <a id="dashboard-link" class="dashboard-link" href="#" target="_blank" rel="noopener" style="display:none;">
-          View on Pangram ↗
-        </a>
-      </div>
-
-      <!-- Empty state -->
-      <div id="results-empty" class="results-empty">
-        <div class="empty-icon">◎</div>
-        <p>Paste or upload text, then click <strong>Analyze</strong> to scan for AI-generated content.</p>
-      </div>
-
-      <!-- Loading state -->
-      <div id="results-loading" class="results-loading" style="display:none;">
-        <div class="scan-bar"></div>
-        <p>Scanning document…</p>
-      </div>
-
-      <!-- Error state -->
-      <div id="results-error" class="results-error" style="display:none;">
-        <p id="error-message"></p>
-      </div>
-
-      <!-- Results content -->
-      <div id="results-content" style="display:none;">
-        <!-- Summary cards -->
-        <div id="summary-cards" class="summary-cards">
-          <div class="summary-card summary-card--headline">
-            <span class="summary-card-label">Verdict</span>
-            <span id="summary-headline" class="summary-card-value"></span>
-            <span id="summary-prediction-badge" class="prediction-badge"></span>
-          </div>
-          <div class="summary-card summary-card--ai">
-            <span class="summary-card-label">AI-Generated</span>
-            <span id="summary-ai" class="summary-card-value">0%</span>
-            <div class="summary-bar"><div id="bar-ai" class="summary-bar-fill"></div></div>
-          </div>
-          <div class="summary-card summary-card--assisted">
-            <span class="summary-card-label">AI-Assisted</span>
-            <span id="summary-assisted" class="summary-card-value">0%</span>
-            <div class="summary-bar"><div id="bar-assisted" class="summary-bar-fill"></div></div>
-          </div>
-          <div class="summary-card summary-card--human">
-            <span class="summary-card-label">Human</span>
-            <span id="summary-human" class="summary-card-value">0%</span>
-            <div class="summary-bar"><div id="bar-human" class="summary-bar-fill"></div></div>
-          </div>
-        </div>
-
-        <!-- Annotated text -->
-        <div class="annotated-section">
-          <h3>Annotated Text</h3>
-          <div id="annotated-text" class="annotated-text"></div>
-        </div>
-
-        <!-- Segment table -->
-        <div class="segments-section">
-          <h3>Segment Details</h3>
-          <div class="table-wrap">
-            <table id="segment-table" class="segment-table">
-              <thead>
-                <tr>
-                  <th>Text</th>
-                  <th>Label</th>
-                  <th>Score</th>
-                  <th>Confidence</th>
-                  <th>Words</th>
-                </tr>
-              </thead>
-              <tbody id="segment-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Flagged phrases -->
-        <div class="flagged-section">
-          <div class="flagged-header">
-            <h3>Flagged Phrases</h3>
-            <div class="flagged-actions">
-              <button id="btn-copy-flagged" class="btn-ghost btn-sm">Copy All</button>
-              <button id="btn-clear-flagged" class="btn-ghost btn-sm">Clear Collection</button>
-            </div>
-          </div>
-          <p class="flagged-description">Segments flagged as AI-Generated or with a high AI assistance score (>0.6). Persists across sessions.</p>
-          <div id="flagged-list" class="flagged-list"></div>
-          <div id="flagged-empty" class="flagged-empty">No flagged phrases yet.</div>
+      <div class="input-foot">
+        <p id="input-stats" class="fineprint"></p>
+        <div class="input-actions">
+          <label class="check">
+            <input type="checkbox" id="opt-link" />
+            Create a public Pangram link
+          </label>
+          <button type="button" id="btn-clear" class="btn-link">Clear</button>
+          <button type="button" id="btn-analyze" class="btn" disabled>Analyze</button>
         </div>
       </div>
     </section>
-  </main>
+
+    <div id="results" class="results" hidden>
+      <section>
+        <h2 class="section-head">Breakdown</h2>
+        <div class="figures">
+          <div class="figure figure--ai">
+            <span id="fig-ai" class="figure-value">0%</span>
+            <span class="figure-label">AI-generated</span>
+          </div>
+          <div class="figure figure--assisted">
+            <span id="fig-assisted" class="figure-value">0%</span>
+            <span class="figure-label">AI-assisted</span>
+          </div>
+          <div class="figure">
+            <span id="fig-human" class="figure-value">0%</span>
+            <span class="figure-label">Human</span>
+          </div>
+        </div>
+        <div class="bar" role="img" id="bar" aria-label="Share of text by label">
+          <div id="bar-ai" class="bar-part bar-part--ai"></div>
+          <div id="bar-assisted" class="bar-part bar-part--assisted"></div>
+          <div id="bar-human" class="bar-part bar-part--human"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="section-head">Annotated text</h2>
+        <div id="annotated-text" class="annotated"></div>
+        <p class="note">
+          <span class="key key--ai">AI-generated</span>
+          <span class="key key--assisted">AI-assisted</span>
+          Unmarked text reads as human. Select a passage to find it in the table.
+        </p>
+      </section>
+
+      <section>
+        <h2 class="section-head">Segments</h2>
+        <div class="table-scroll">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>Text</th>
+                <th>Label</th>
+                <th class="num">AI score</th>
+                <th>Confidence</th>
+                <th class="num">Humanizer</th>
+                <th class="num">Words</th>
+              </tr>
+            </thead>
+            <tbody id="segment-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section id="flagged-section" hidden>
+      <div class="section-head section-head--split">
+        <h2>Flagged phrases</h2>
+        <span class="section-actions">
+          <button type="button" id="btn-copy-flagged" class="btn-link">Copy all</button>
+          <button type="button" id="btn-clear-flagged" class="btn-link">Clear</button>
+        </span>
+      </div>
+      <ul id="flagged-list" class="flagged"></ul>
+      <p class="note">Passages Pangram labeled AI-generated, scored above 60%, or marked as humanized. Saved in this browser only.</p>
+    </section>
+
+    <footer class="colophon">
+      Detection by Pangram. Results are estimates, and very short texts are unreliable.
+    </footer>
+  </div>
 
   <script type="module" src="/src/main.js"></script>
 </body>

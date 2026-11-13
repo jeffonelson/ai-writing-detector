@@ -1,551 +1,619 @@
 /**
- * AI Writing Detector — Main Application Logic
- * Handles text input, Pangram API calls, results rendering,
- * credit tracking, and flagged phrase collection.
+ * AI Writing Detector: paste text, send it to Pangram through the local proxy,
+ * and show which passages read as AI-generated, AI-assisted or human.
  */
 
 import { marked } from 'marked';
 
-// ═══════════════════════════════════════════════════
-// DOM REFERENCES
-// ═══════════════════════════════════════════════════
-
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+const $ = (id) => document.getElementById(id);
 
 const els = {
-    textInput: $('#text-input'),
-    dropZone: $('#drop-zone'),
-    dropOverlay: $('#drop-overlay'),
-    wordCount: $('#word-count'),
-    creditEstimate: $('#credit-estimate'),
-    btnAnalyze: $('#btn-analyze'),
-    btnClear: $('#btn-clear'),
-    btnResetCredits: $('#btn-reset-credits'),
-    creditCount: $('#credit-count'),
-
-    resultsEmpty: $('#results-empty'),
-    resultsLoading: $('#results-loading'),
-    resultsError: $('#results-error'),
-    resultsContent: $('#results-content'),
-    errorMessage: $('#error-message'),
-
-    summaryHeadline: $('#summary-headline'),
-    summaryPredictionBadge: $('#summary-prediction-badge'),
-    summaryAi: $('#summary-ai'),
-    summaryAssisted: $('#summary-assisted'),
-    summaryHuman: $('#summary-human'),
-    barAi: $('#bar-ai'),
-    barAssisted: $('#bar-assisted'),
-    barHuman: $('#bar-human'),
-
-    annotatedText: $('#annotated-text'),
-    segmentTbody: $('#segment-tbody'),
-    dashboardLink: $('#dashboard-link'),
-
-    btnCopyFlagged: $('#btn-copy-flagged'),
-    btnClearFlagged: $('#btn-clear-flagged'),
-    flaggedList: $('#flagged-list'),
-    flaggedEmpty: $('#flagged-empty'),
+    modelPicker: $('model-picker'),
+    account: $('account'),
+    hero: $('hero'),
+    headline: $('headline'),
+    dek: $('dek'),
+    fineprint: $('fineprint'),
+    dropZone: $('drop-zone'),
+    textInput: $('text-input'),
+    inputStats: $('input-stats'),
+    optLink: $('opt-link'),
+    btnAnalyze: $('btn-analyze'),
+    btnClear: $('btn-clear'),
+    results: $('results'),
+    figAi: $('fig-ai'),
+    figAssisted: $('fig-assisted'),
+    figHuman: $('fig-human'),
+    bar: $('bar'),
+    barAi: $('bar-ai'),
+    barAssisted: $('bar-assisted'),
+    barHuman: $('bar-human'),
+    annotated: $('annotated-text'),
+    segmentTbody: $('segment-tbody'),
+    flaggedSection: $('flagged-section'),
+    flaggedList: $('flagged-list'),
+    btnCopyFlagged: $('btn-copy-flagged'),
+    btnClearFlagged: $('btn-clear-flagged'),
 };
 
-// ═══════════════════════════════════════════════════
-// STATE
-// ═══════════════════════════════════════════════════
+const MODEL_KEY = 'pangram_model';
+const LINK_KEY = 'pangram_public_link';
+const FLAGGED_KEY = 'pangram_flagged_phrases';
+const FALLBACK_MODELS = ['pangram-4'];
+const WORDS_PER_UNIT = 100; // Pangram 4 bills per started 100-word block
+const MAX_FLAGGED = 200;
+const IDLE_HEADLINE = 'Paste some writing to see how much of it reads as AI.';
 
 let isAnalyzing = false;
+let balance = null;
 
-// ═══════════════════════════════════════════════════
-// CREDIT TRACKING (localStorage)
-// ═══════════════════════════════════════════════════
+// ─── Small helpers ───────────────────────────────────────────────
 
-const CREDIT_KEY = 'pangram_credits_used';
-const FLAGGED_KEY = 'pangram_flagged_phrases';
-
-function getCreditsUsed() {
-    return parseInt(localStorage.getItem(CREDIT_KEY) || '0', 10);
-}
-
-function addCredits(n) {
-    const total = getCreditsUsed() + n;
-    localStorage.setItem(CREDIT_KEY, String(total));
-    renderCreditBadge();
-}
-
-function resetCredits() {
-    localStorage.setItem(CREDIT_KEY, '0');
-    renderCreditBadge();
-}
-
-function renderCreditBadge() {
-    els.creditCount.textContent = getCreditsUsed();
-}
-
-function estimateCredits(wordCount) {
-    if (wordCount === 0) return 0;
-    return Math.ceil(wordCount / 1000);
-}
-
-// ═══════════════════════════════════════════════════
-// FLAGGED PHRASES (localStorage)
-// ═══════════════════════════════════════════════════
-
-function getFlaggedPhrases() {
-    try {
-        return JSON.parse(localStorage.getItem(FLAGGED_KEY) || '[]');
-    } catch {
-        return [];
-    }
-}
-
-function saveFlaggedPhrases(phrases) {
-    localStorage.setItem(FLAGGED_KEY, JSON.stringify(phrases));
-}
-
-function addFlaggedPhrases(windows) {
-    const existing = getFlaggedPhrases();
-    const now = new Date().toISOString();
-
-    for (const w of windows) {
-        // Flag if AI-Generated OR score > 0.6
-        if (w.label === 'AI-Generated' || w.ai_assistance_score > 0.6) {
-            // Avoid exact duplicates
-            const text = w.text.trim();
-            if (text && !existing.some(e => e.text === text)) {
-                existing.push({
-                    text,
-                    label: w.label,
-                    score: w.ai_assistance_score,
-                    confidence: w.confidence,
-                    timestamp: now,
-                });
-            }
+const store = {
+    get(key, fallback) {
+        try {
+            const raw = localStorage.getItem(key);
+            return raw === null ? fallback : JSON.parse(raw);
+        } catch {
+            return fallback;
         }
-    }
+    },
+    set(key, value) {
+        try {
+            localStorage.setItem(key, JSON.stringify(value));
+        } catch {
+            // storage full or unavailable: the app still works without persistence
+        }
+    },
+};
 
-    saveFlaggedPhrases(existing);
-    renderFlaggedPhrases();
+function escapeHtml(value) {
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(value ?? '').replace(/[&<>"']/g, (c) => map[c]);
 }
 
-function clearFlaggedPhrases() {
-    saveFlaggedPhrases([]);
-    renderFlaggedPhrases();
+const usd = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+});
+
+function pct(fraction, digits = 0) {
+    const n = Number(fraction);
+    return `${((Number.isFinite(n) ? n : 0) * 100).toFixed(digits)}%`;
 }
 
-function renderFlaggedPhrases() {
-    const phrases = getFlaggedPhrases();
-
-    if (phrases.length === 0) {
-        els.flaggedList.style.display = 'none';
-        els.flaggedEmpty.style.display = 'block';
-        return;
-    }
-
-    els.flaggedList.style.display = 'flex';
-    els.flaggedEmpty.style.display = 'none';
-
-    els.flaggedList.innerHTML = phrases.map((p) => {
-        const cls = labelClass(p.label);
-        const scoreStr = (p.score * 100).toFixed(0);
-        const date = new Date(p.timestamp).toLocaleDateString();
-        return `
-      <div class="flagged-item">
-        <div class="flagged-item-text">${escapeHtml(p.text)}</div>
-        <div class="flagged-item-meta">
-          <span class="label-badge label-badge--${cls}">${escapeHtml(p.label)}</span>
-          <span>Score: ${scoreStr}%</span>
-          <span>${date}</span>
-        </div>
-      </div>
-    `;
-    }).join('');
+function plural(n, word) {
+    return `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
 }
 
-async function copyFlaggedToClipboard() {
-    const phrases = getFlaggedPhrases();
-    if (phrases.length === 0) return;
+function modelName(selector) {
+    return selector.replace(/^pangram-/, 'Pangram ');
+}
 
-    const text = phrases.map((p) => {
-        return `[${p.label} | Score: ${(p.score * 100).toFixed(0)}% | ${p.confidence}] "${p.text}"`;
-    }).join('\n\n');
-
+async function api(path, options) {
+    let res;
     try {
-        await navigator.clipboard.writeText(text);
-        els.btnCopyFlagged.textContent = 'Copied!';
-        setTimeout(() => { els.btnCopyFlagged.textContent = 'Copy All'; }, 2000);
+        res = await fetch(path, options);
     } catch {
-        // Fallback
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        els.btnCopyFlagged.textContent = 'Copied!';
-        setTimeout(() => { els.btnCopyFlagged.textContent = 'Copy All'; }, 2000);
+        throw new Error('Could not reach the local server. Is it still running?');
     }
+    let data = null;
+    try {
+        data = await res.json();
+    } catch {
+        // handled below
+    }
+    if (!res.ok) throw new Error(data?.error || `The request failed (status ${res.status}).`);
+    if (data === null) throw new Error('The local server returned an unreadable response.');
+    return data;
 }
 
-// ═══════════════════════════════════════════════════
-// TEXT INPUT & WORD COUNT
-// ═══════════════════════════════════════════════════
+// ─── Text preparation ────────────────────────────────────────────
 
 function countWords(text) {
-    const stripped = text.trim();
-    if (!stripped) return 0;
-    return stripped.split(/\s+/).length;
+    const trimmed = text.trim();
+    return trimmed ? trimmed.split(/\s+/).length : 0;
+}
+
+function looksLikeMarkdown(text) {
+    return /^#{1,6}\s+\S|^```|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^)\s]+\)/m.test(text);
 }
 
 function stripMarkdown(md) {
-    // Use marked to parse, then strip HTML tags to get plain text
-    const html = marked.parse(md, { async: false });
-    const div = document.createElement('div');
-    div.innerHTML = html;
-    return div.textContent || div.innerText || '';
+    // Keep a blank line between blocks so paragraphs survive as paragraphs.
+    const html = marked
+        .parse(md, { async: false })
+        .replace(/<\/(p|h[1-6]|pre|ul|ol|blockquote|table)>/g, '$&\n');
+    // DOMParser builds an inert document: scripts don't run and images don't load.
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    return (doc.body.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-function updateWordCount() {
-    const text = els.textInput.value;
-    const wc = countWords(text);
-    const credits = estimateCredits(wc);
-
-    els.wordCount.textContent = `${wc.toLocaleString()} word${wc !== 1 ? 's' : ''}`;
-    els.creditEstimate.textContent = `~${credits} credit${credits !== 1 ? 's' : ''}`;
-    els.btnAnalyze.disabled = wc === 0 || isAnalyzing;
-}
-
-// ═══════════════════════════════════════════════════
-// DRAG & DROP
-// ═══════════════════════════════════════════════════
-
-function setupDragDrop() {
-    const zone = els.dropZone;
-    let dragCounter = 0;
-
-    zone.addEventListener('dragenter', (e) => {
-        e.preventDefault();
-        dragCounter++;
-        zone.classList.add('dragging');
-    });
-
-    zone.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        dragCounter--;
-        if (dragCounter <= 0) {
-            dragCounter = 0;
-            zone.classList.remove('dragging');
+/** The exact text that gets sent to Pangram, plus whether Markdown was removed. */
+function prepareText(raw) {
+    const trimmed = raw.trim();
+    if (trimmed && looksLikeMarkdown(trimmed)) {
+        try {
+            return { text: stripMarkdown(trimmed), stripped: true };
+        } catch {
+            // fall through and send the text as written
         }
-    });
+    }
+    return { text: trimmed, stripped: false };
+}
 
-    zone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-    });
+function updateInputStats() {
+    const { text, stripped } = prepareText(els.textInput.value);
+    const words = countWords(text);
+    els.btnAnalyze.disabled = words === 0 || isAnalyzing;
 
-    zone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dragCounter = 0;
-        zone.classList.remove('dragging');
+    if (words === 0) {
+        els.inputStats.textContent = 'Markdown formatting is removed before analysis.';
+        return;
+    }
+    const units = Math.max(1, Math.ceil(words / WORDS_PER_UNIT));
+    els.inputStats.textContent =
+        `${plural(words, 'word')} · about ${plural(units, 'billable unit')}` +
+        (stripped ? ' · Markdown removed' : '');
+}
 
-        const files = e.dataTransfer.files;
-        if (files.length > 0) {
-            const file = files[0];
-            const ext = file.name.split('.').pop().toLowerCase();
+let statsTimer = 0;
+function scheduleInputStats() {
+    clearTimeout(statsTimer);
+    statsTimer = setTimeout(updateInputStats, 120);
+}
 
-            if (['md', 'txt', 'markdown', 'text'].includes(ext)) {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    els.textInput.value = reader.result;
-                    updateWordCount();
-                };
-                reader.readAsText(file);
-            } else {
-                showError(`Unsupported file type: .${ext}. Please use .md or .txt files.`);
-            }
+// ─── Masthead: models and account ────────────────────────────────
+
+function renderModels(models) {
+    const saved = store.get(MODEL_KEY, null);
+    const selected = models.includes(saved) ? saved : models.includes('pangram-4') ? 'pangram-4' : models[0];
+    els.modelPicker.innerHTML = models
+        .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(modelName(m))}</option>`)
+        .join('');
+    els.modelPicker.value = selected;
+}
+
+async function loadModels() {
+    renderModels(FALLBACK_MODELS);
+    try {
+        const data = await api('/api/models');
+        const list = Array.isArray(data.models) ? data.models.filter((m) => typeof m === 'string') : [];
+        // "default" is an alias; prefer naming the model explicitly when we can.
+        const named = list.filter((m) => m !== 'default');
+        if (named.length || list.length) renderModels(named.length ? named : list);
+    } catch (err) {
+        if (!isAnalyzing && els.results.hidden) setHero('error', err.message);
+    }
+}
+
+async function refreshAccount() {
+    try {
+        const data = await api('/api/account');
+        const parts = [];
+        const available = Number(data.balance?.available_balance_usd);
+        balance = data.balance && Number.isFinite(available) ? available : null;
+        if (balance !== null) parts.push(`Balance <strong>${escapeHtml(usd.format(balance))}</strong>`);
+
+        const spent = Number(data.usage?.total_cost_usd);
+        if (data.usage && Number.isFinite(spent)) {
+            parts.push(`This month <strong>${escapeHtml(usd.format(spent))}</strong>`);
         }
-    });
+        els.account.innerHTML = parts.join(' · ');
+    } catch {
+        balance = null;
+        els.account.textContent = '';
+    }
+    return balance;
 }
 
-// ═══════════════════════════════════════════════════
-// UI STATE MANAGEMENT
-// ═══════════════════════════════════════════════════
+// ─── Hero ────────────────────────────────────────────────────────
 
-function showState(state) {
-    els.resultsEmpty.style.display = state === 'empty' ? 'flex' : 'none';
-    els.resultsLoading.style.display = state === 'loading' ? 'flex' : 'none';
-    els.resultsError.style.display = state === 'error' ? 'flex' : 'none';
-    els.resultsContent.style.display = state === 'results' ? 'block' : 'none';
+function setHero(state, headline, dek = '', fineprint = []) {
+    els.hero.classList.toggle('is-loading', state === 'loading');
+    els.hero.classList.toggle('is-error', state === 'error');
+    els.headline.textContent = headline;
+    els.dek.textContent = dek;
+    els.fineprint.replaceChildren(
+        ...fineprint.flatMap((part, i) => (i === 0 ? [part] : [' · ', part])),
+    );
 }
 
-function showError(msg) {
-    els.errorMessage.textContent = msg;
-    showState('error');
-}
-
-function setAnalyzing(v) {
-    isAnalyzing = v;
-    els.btnAnalyze.classList.toggle('loading', v);
-    els.btnAnalyze.disabled = v;
-    els.textInput.disabled = v;
-    if (v) showState('loading');
-}
-
-// ═══════════════════════════════════════════════════
-// API CALL
-// ═══════════════════════════════════════════════════
+// ─── Analysis ────────────────────────────────────────────────────
 
 async function analyzeText() {
-    const rawText = els.textInput.value.trim();
-    if (!rawText) return;
+    if (isAnalyzing) return;
+    const { text } = prepareText(els.textInput.value);
+    const words = countWords(text);
+    if (!words) return;
 
-    // Detect if it looks like markdown and strip it
-    const hasMarkdown = /[#*_\[\]`>-]{2,}|^\s*#{1,6}\s/m.test(rawText);
-    const plainText = hasMarkdown ? stripMarkdown(rawText) : rawText;
+    const model = els.modelPicker.value;
+    isAnalyzing = true;
+    els.btnAnalyze.disabled = true;
+    els.btnAnalyze.textContent = 'Analyzing…';
+    els.textInput.disabled = true;
+    els.modelPicker.disabled = true;
+    els.results.hidden = true;
+    setHero('loading', `Reading ${plural(words, 'word')} with ${modelName(model)}…`);
 
-    const wordCount = countWords(plainText);
-    const creditsUsed = estimateCredits(wordCount);
-
-    setAnalyzing(true);
-
+    const balanceBefore = balance;
     try {
-        const res = await fetch('/api/analyze', {
+        const data = await api('/api/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: plainText }),
+            body: JSON.stringify({
+                text,
+                model,
+                public_dashboard_link: els.optLink.checked,
+            }),
         });
+        renderResults(data, text, model);
 
-        const data = await res.json();
-
-        if (!res.ok) {
-            throw new Error(data.error || `API returned status ${res.status}`);
+        // Report what the scan actually cost, when the balance shows it.
+        const balanceAfter = await refreshAccount();
+        if (balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter) {
+            els.fineprint.append(` · Cost ${usd.format(balanceBefore - balanceAfter)}`);
         }
-
-        // Track credits
-        addCredits(creditsUsed);
-
-        // Render results
-        renderResults(data, plainText);
-        showState('results');
-
     } catch (err) {
-        showError(err.message || 'Failed to analyze text. Check your API key and try again.');
+        setHero('error', err.message || 'The analysis failed.');
     } finally {
-        setAnalyzing(false);
-        updateWordCount();
+        isAnalyzing = false;
+        els.btnAnalyze.textContent = 'Analyze';
+        els.textInput.disabled = false;
+        els.modelPicker.disabled = false;
+        updateInputStats();
     }
 }
 
-// ═══════════════════════════════════════════════════
-// RESULTS RENDERING
-// ═══════════════════════════════════════════════════
-
-function renderResults(data, plainText) {
-    // Summary
-    els.summaryHeadline.textContent = data.headline || data.prediction || '—';
-    els.summaryPredictionBadge.textContent = data.prediction_short || '—';
-    els.summaryPredictionBadge.setAttribute('data-prediction', data.prediction_short || '');
-
-    const aiPct = ((data.fraction_ai || 0) * 100).toFixed(1);
-    const assistedPct = ((data.fraction_ai_assisted || 0) * 100).toFixed(1);
-    const humanPct = ((data.fraction_human || 0) * 100).toFixed(1);
-
-    els.summaryAi.textContent = `${aiPct}%`;
-    els.summaryAssisted.textContent = `${assistedPct}%`;
-    els.summaryHuman.textContent = `${humanPct}%`;
-
-    // Animate bars
-    requestAnimationFrame(() => {
-        els.barAi.style.width = `${aiPct}%`;
-        els.barAssisted.style.width = `${assistedPct}%`;
-        els.barHuman.style.width = `${humanPct}%`;
-    });
-
-    // Dashboard link
-    if (data.dashboard_link) {
-        els.dashboardLink.href = data.dashboard_link;
-        els.dashboardLink.style.display = 'inline-flex';
-    } else {
-        els.dashboardLink.style.display = 'none';
-    }
-
-    // Annotated text
-    renderAnnotatedText(data, plainText);
-
-    // Segment table
-    renderSegmentTable(data.windows || []);
-
-    // Flagged phrases
-    addFlaggedPhrases(data.windows || []);
-}
+// ─── Results ─────────────────────────────────────────────────────
 
 function labelClass(label) {
-    if (!label) return 'human';
-    const l = label.toLowerCase();
-    if (l.includes('ai-generated') || l === 'ai-generated') return 'ai';
-    if (l.includes('assisted') || l.includes('moderate')) return 'assisted';
+    const l = String(label || '').toLowerCase();
+    if (l.includes('assist') || l.includes('mixed')) return 'assisted';
+    if (l.includes('ai')) return 'ai';
     return 'human';
 }
 
-function renderAnnotatedText(data, plainText) {
-    const windows = data.windows || [];
+function isHumanized(w) {
+    return w.is_humanized === true;
+}
 
-    if (windows.length === 0) {
-        els.annotatedText.textContent = plainText;
-        return;
+/** Windows with usable offsets, each tagged with its position in the API response. */
+function usableWindows(data) {
+    const windows = Array.isArray(data.windows) ? data.windows : [];
+    return windows
+        .map((w, index) => ({ ...w, index }))
+        .filter((w) => w && typeof w === 'object');
+}
+
+/**
+ * Pangram's offsets may count Unicode code points while JS strings count
+ * UTF-16 units. Pick whichever reading reproduces the window texts.
+ */
+function makeSlicer(text, windows) {
+    const points = Array.from(text);
+    const byUnit = { length: text.length, slice: (s, e) => text.slice(s, e) };
+    if (points.length === text.length) return byUnit;
+
+    const byPoint = { length: points.length, slice: (s, e) => points.slice(s, e).join('') };
+    let unitHits = 0;
+    let pointHits = 0;
+    for (const w of windows) {
+        if (byUnit.slice(w.start_index, w.end_index) === w.text) unitHits++;
+        if (byPoint.slice(w.start_index, w.end_index) === w.text) pointHits++;
     }
+    return pointHits > unitHits ? byPoint : byUnit;
+}
 
-    // Sort windows by start_index
-    const sorted = [...windows].sort((a, b) => a.start_index - b.start_index);
+function windowTitle(w) {
+    const parts = [String(w.label || 'Unlabeled'), `AI score ${pct(w.ai_assistance_score)}`];
+    if (w.confidence) parts.push(`${w.confidence} confidence`);
+    if (isHumanized(w)) parts.push('humanized');
+    return parts.join(' · ');
+}
+
+function renderAnnotated(text, windows) {
+    const spans = windows
+        .filter((w) => Number.isInteger(w.start_index) && Number.isInteger(w.end_index))
+        .sort((a, b) => a.start_index - b.start_index);
+    const slicer = makeSlicer(text, spans);
 
     let html = '';
-    let lastEnd = 0;
+    let cursor = 0;
+    for (const w of spans) {
+        // Windows can overlap; only draw the part that hasn't been drawn yet.
+        const start = Math.max(w.start_index, cursor);
+        const end = Math.min(w.end_index, slicer.length);
+        if (end <= start) continue;
 
-    for (let i = 0; i < sorted.length; i++) {
-        const w = sorted[i];
-        const start = w.start_index;
-        const end = w.end_index;
-
-        // Gap between segments
-        if (start > lastEnd) {
-            html += escapeHtml(plainText.slice(lastEnd, start));
-        }
-
-        const cls = labelClass(w.label);
-        const scoreStr = (w.ai_assistance_score * 100).toFixed(0);
-        const segText = plainText.slice(start, end);
-
-        html += `<span class="seg seg--${cls}" data-index="${i}">`;
-        html += escapeHtml(segText);
-        html += `<span class="seg-tooltip">`;
-        html += `<span class="seg-tooltip-label">${escapeHtml(w.label)}</span>`;
-        html += `<span class="seg-tooltip-score">Score: ${scoreStr}%</span>`;
-        html += `<span class="seg-tooltip-confidence">${escapeHtml(w.confidence)}</span>`;
-        html += `</span>`;
-        html += `</span>`;
-
-        lastEnd = end;
+        if (start > cursor) html += escapeHtml(slicer.slice(cursor, start));
+        html +=
+            `<span class="seg seg--${labelClass(w.label)}" data-index="${w.index}" ` +
+            `title="${escapeHtml(windowTitle(w))}">${escapeHtml(slicer.slice(start, end))}</span>`;
+        cursor = end;
     }
+    if (cursor < slicer.length) html += escapeHtml(slicer.slice(cursor, slicer.length));
 
-    // Remaining text after last segment
-    if (lastEnd < plainText.length) {
-        html += escapeHtml(plainText.slice(lastEnd));
-    }
-
-    els.annotatedText.innerHTML = html;
-
-    // Click to highlight in table
-    els.annotatedText.querySelectorAll('.seg').forEach((seg) => {
-        seg.addEventListener('click', () => {
-            const idx = seg.dataset.index;
-            highlightTableRow(idx);
-        });
-    });
+    els.annotated.innerHTML = html;
 }
 
-function renderSegmentTable(windows) {
-    if (windows.length === 0) {
-        els.segmentTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">No segments returned.</td></tr>';
+function renderSegments(windows) {
+    if (!windows.length) {
+        els.segmentTbody.innerHTML = '<tr><td class="empty" colspan="6">Pangram returned no segments.</td></tr>';
         return;
     }
 
-    els.segmentTbody.innerHTML = windows.map((w, i) => {
-        const cls = labelClass(w.label);
-        const scoreStr = (w.ai_assistance_score * 100).toFixed(0);
-        const excerpt = w.text.length > 80 ? w.text.slice(0, 80) + '…' : w.text;
+    els.segmentTbody.innerHTML = windows
+        .map((w) => {
+            const text = String(w.text ?? '');
+            const excerpt = text.length > 110 ? `${text.slice(0, 110).trimEnd()}…` : text;
+            const cls = labelClass(w.label);
 
-        return `
-      <tr data-index="${i}">
-        <td title="${escapeHtml(w.text)}">${escapeHtml(excerpt)}</td>
-        <td><span class="label-badge label-badge--${cls}">${escapeHtml(w.label)}</span></td>
-        <td>${scoreStr}%</td>
-        <td>${escapeHtml(w.confidence)}</td>
-        <td>${w.word_count}</td>
-      </tr>
-    `;
-    }).join('');
+            // Pangram 4.1 adds per-class probabilities: Human, AI-Assisted, AI-Generated.
+            const probs = Array.isArray(w.class_probabilities) && w.class_probabilities.length === 3
+                ? `Human ${pct(w.class_probabilities[0])} · AI-assisted ${pct(w.class_probabilities[1])} · AI-generated ${pct(w.class_probabilities[2])}`
+                : '';
 
-    // Click table row to highlight annotation
-    els.segmentTbody.querySelectorAll('tr').forEach((row) => {
-        row.addEventListener('click', () => {
-            const idx = row.dataset.index;
-            highlightAnnotation(idx);
+            let humanizer = '<span class="faint">—</span>';
+            if (typeof w.humanizer_score === 'number') {
+                humanizer = isHumanized(w)
+                    ? `<span class="strong">${pct(w.humanizer_score)}</span>`
+                    : `<span class="faint">${pct(w.humanizer_score)}</span>`;
+            } else if (isHumanized(w)) {
+                humanizer = '<span class="strong">Yes</span>';
+            }
+
+            return `
+      <tr data-index="${w.index}">
+        <td class="excerpt">${escapeHtml(excerpt)}</td>
+        <td><span class="label label--${cls}">${escapeHtml(w.label || '—')}</span></td>
+        <td class="num" title="${escapeHtml(probs)}">${pct(w.ai_assistance_score)}</td>
+        <td>${escapeHtml(w.confidence || '—')}</td>
+        <td class="num">${humanizer}</td>
+        <td class="num">${Number.isFinite(w.word_count) ? w.word_count.toLocaleString() : '—'}</td>
+      </tr>`;
+        })
+        .join('');
+}
+
+function renderResults(data, sentText, model) {
+    const windows = usableWindows(data);
+    // Pangram may normalize the input; window offsets refer to the text it returns.
+    const text = typeof data.text === 'string' && data.text ? data.text : sentText;
+    const version = data.version ? `Pangram ${data.version}` : modelName(model);
+
+    const ai = Number(data.fraction_ai) || 0;
+    const assisted = Number(data.fraction_ai_assisted) || 0;
+    const human = Number(data.fraction_human) || 0;
+
+    const fine = [`${plural(countWords(text), 'word')}`, version];
+    if (typeof data.dashboard_link === 'string' && /^https:\/\//i.test(data.dashboard_link)) {
+        const link = document.createElement('a');
+        link.href = data.dashboard_link;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'View on Pangram ↗';
+        fine.push(link);
+    }
+
+    const humanizedCount = windows.filter(isHumanized).length;
+    const dek =
+        `${pct(ai)} AI-generated, ${pct(assisted)} AI-assisted and ${pct(human)} human ` +
+        `across ${plural(windows.length, 'segment')}.` +
+        (humanizedCount
+            ? ` ${plural(humanizedCount, 'segment')} ${humanizedCount === 1 ? 'looks' : 'look'} run through a humanizer.`
+            : '');
+
+    setHero('result', data.prediction || data.headline || 'Analysis complete.', dek, fine);
+
+    els.figAi.textContent = pct(ai);
+    els.figAssisted.textContent = pct(assisted);
+    els.figHuman.textContent = pct(human);
+    els.barAi.style.flexGrow = String(ai);
+    els.barAssisted.style.flexGrow = String(assisted);
+    els.barHuman.style.flexGrow = String(human);
+    els.bar.setAttribute(
+        'aria-label',
+        `${pct(ai)} AI-generated, ${pct(assisted)} AI-assisted, ${pct(human)} human`,
+    );
+
+    renderAnnotated(text, windows);
+    renderSegments(windows);
+    els.results.hidden = false;
+
+    addFlaggedPhrases(windows, data.version);
+}
+
+function activate(index, scrollTarget) {
+    for (const el of document.querySelectorAll('.seg.active, #segment-tbody tr.active')) {
+        el.classList.remove('active');
+    }
+    const seg = els.annotated.querySelector(`.seg[data-index="${CSS.escape(index)}"]`);
+    const row = els.segmentTbody.querySelector(`tr[data-index="${CSS.escape(index)}"]`);
+    seg?.classList.add('active');
+    row?.classList.add('active');
+    (scrollTarget === 'row' ? row : seg)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ─── Flagged phrases (kept in this browser) ──────────────────────
+
+function getFlagged() {
+    const list = store.get(FLAGGED_KEY, []);
+    return Array.isArray(list) ? list.filter((p) => p && typeof p.text === 'string') : [];
+}
+
+function addFlaggedPhrases(windows, version) {
+    const flagged = getFlagged();
+    const seen = new Set(flagged.map((p) => p.text));
+    const now = new Date().toISOString();
+
+    for (const w of windows) {
+        const text = String(w.text ?? '').trim();
+        const isFlagged = labelClass(w.label) === 'ai' || w.ai_assistance_score > 0.6 || isHumanized(w);
+        if (!isFlagged || !text || seen.has(text)) continue;
+        seen.add(text);
+        flagged.push({
+            text,
+            label: w.label,
+            score: w.ai_assistance_score,
+            confidence: w.confidence,
+            is_humanized: w.is_humanized,
+            humanizer_score: w.humanizer_score,
+            version,
+            timestamp: now,
         });
+    }
+
+    store.set(FLAGGED_KEY, flagged.slice(-MAX_FLAGGED));
+    renderFlagged();
+}
+
+function renderFlagged() {
+    const flagged = getFlagged();
+    els.flaggedSection.hidden = flagged.length === 0;
+
+    els.flaggedList.innerHTML = flagged
+        .slice()
+        .reverse()
+        .map((p) => {
+            const date = new Date(p.timestamp);
+            const meta = [
+                `<span class="label--${labelClass(p.label)}">${escapeHtml(p.label || 'Flagged')}</span>`,
+                `score ${pct(p.score)}`,
+            ];
+            if (p.is_humanized) meta.push('humanized');
+            if (!Number.isNaN(date.getTime())) meta.push(escapeHtml(date.toLocaleDateString()));
+            return `<li><p class="flagged-text">${escapeHtml(p.text)}</p><p class="flagged-meta">${meta.join(' · ')}</p></li>`;
+        })
+        .join('');
+}
+
+async function copyFlagged() {
+    const flagged = getFlagged();
+    if (!flagged.length) return;
+
+    const text = flagged
+        .map((p) => {
+            const bits = [p.label || 'Flagged', `score ${pct(p.score)}`];
+            if (p.confidence) bits.push(`${p.confidence} confidence`);
+            if (p.is_humanized) bits.push('humanized');
+            return `[${bits.join(' | ')}] "${p.text}"`;
+        })
+        .join('\n\n');
+
+    let label = 'Copied';
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch {
+        label = 'Copy failed';
+    }
+    els.btnCopyFlagged.textContent = label;
+    setTimeout(() => {
+        els.btnCopyFlagged.textContent = 'Copy all';
+    }, 2000);
+}
+
+// ─── Drag and drop ───────────────────────────────────────────────
+
+function setupDragDrop() {
+    const zone = els.dropZone;
+    let depth = 0;
+    const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+
+    zone.addEventListener('dragenter', (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        depth++;
+        zone.classList.add('dragging');
+    });
+
+    zone.addEventListener('dragleave', () => {
+        depth = Math.max(0, depth - 1);
+        if (depth === 0) zone.classList.remove('dragging');
+    });
+
+    zone.addEventListener('dragover', (e) => {
+        if (hasFiles(e)) e.preventDefault();
+    });
+
+    zone.addEventListener('drop', async (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        depth = 0;
+        zone.classList.remove('dragging');
+        if (isAnalyzing) return;
+
+        const file = e.dataTransfer.files[0];
+        if (!file) return;
+        const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+        if (!['md', 'markdown', 'txt', 'text'].includes(ext)) {
+            setHero('error', 'That file type is not supported. Drop a .md or .txt file.');
+            return;
+        }
+        if (file.size > 1_000_000) {
+            setHero('error', 'That file is too large. The limit is about 1 MB.');
+            return;
+        }
+        try {
+            els.textInput.value = await file.text();
+            updateInputStats();
+        } catch {
+            setHero('error', 'That file could not be read.');
+        }
     });
 }
 
-function highlightTableRow(idx) {
-    els.segmentTbody.querySelectorAll('tr').forEach(r => r.classList.remove('highlight'));
-    const row = els.segmentTbody.querySelector(`tr[data-index="${idx}"]`);
-    if (row) {
-        row.classList.add('highlight');
-        row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-}
-
-function highlightAnnotation(idx) {
-    els.annotatedText.querySelectorAll('.seg').forEach(s => s.classList.remove('active'));
-    const seg = els.annotatedText.querySelector(`.seg[data-index="${idx}"]`);
-    if (seg) {
-        seg.classList.add('active');
-        seg.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-}
-
-// ═══════════════════════════════════════════════════
-// UTILITIES
-// ═══════════════════════════════════════════════════
-
-function escapeHtml(str) {
-    if (!str) return '';
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-    return str.replace(/[&<>"']/g, (c) => map[c]);
-}
-
-// ═══════════════════════════════════════════════════
-// INIT
-// ═══════════════════════════════════════════════════
+// ─── Init ────────────────────────────────────────────────────────
 
 function init() {
-    // Render initial states
-    renderCreditBadge();
-    renderFlaggedPhrases();
-    updateWordCount();
-    showState('empty');
-
-    // Event listeners
-    els.textInput.addEventListener('input', updateWordCount);
-    els.btnAnalyze.addEventListener('click', analyzeText);
-
-    els.btnClear.addEventListener('click', () => {
-        els.textInput.value = '';
-        updateWordCount();
-        showState('empty');
-        els.dashboardLink.style.display = 'none';
-    });
-
-    els.btnResetCredits.addEventListener('click', () => {
-        if (confirm('Reset credit counter to 0?')) {
-            resetCredits();
-        }
-    });
-
-    els.btnCopyFlagged.addEventListener('click', copyFlaggedToClipboard);
-    els.btnClearFlagged.addEventListener('click', () => {
-        if (confirm('Clear all flagged phrases? This cannot be undone.')) {
-            clearFlaggedPhrases();
-        }
-    });
-
-    // Drag & drop
+    setHero('idle', IDLE_HEADLINE);
+    els.optLink.checked = store.get(LINK_KEY, false) === true;
+    renderFlagged();
+    updateInputStats();
     setupDragDrop();
 
-    // Keyboard shortcut: Ctrl/Cmd + Enter to analyze
-    document.addEventListener('keydown', (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-            if (!els.btnAnalyze.disabled) {
-                analyzeText();
-            }
+    els.textInput.addEventListener('input', scheduleInputStats);
+    els.btnAnalyze.addEventListener('click', analyzeText);
+    els.modelPicker.addEventListener('change', () => store.set(MODEL_KEY, els.modelPicker.value));
+    els.optLink.addEventListener('change', () => store.set(LINK_KEY, els.optLink.checked));
+
+    els.btnClear.addEventListener('click', () => {
+        if (isAnalyzing) return;
+        els.textInput.value = '';
+        els.results.hidden = true;
+        setHero('idle', IDLE_HEADLINE);
+        updateInputStats();
+        els.textInput.focus();
+    });
+
+    els.annotated.addEventListener('click', (e) => {
+        const seg = e.target.closest('.seg');
+        if (seg) activate(seg.dataset.index, 'row');
+    });
+    els.segmentTbody.addEventListener('click', (e) => {
+        const row = e.target.closest('tr[data-index]');
+        if (row) activate(row.dataset.index, 'seg');
+    });
+
+    els.btnCopyFlagged.addEventListener('click', copyFlagged);
+    els.btnClearFlagged.addEventListener('click', () => {
+        if (confirm('Clear all flagged phrases? This cannot be undone.')) {
+            store.set(FLAGGED_KEY, []);
+            renderFlagged();
         }
     });
+
+    document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !els.btnAnalyze.disabled) {
+            e.preventDefault();
+            analyzeText();
+        }
+    });
+
+    loadModels();
+    refreshAccount();
 }
 
 init();
