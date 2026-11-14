@@ -43,6 +43,10 @@
         <p id="input-stats" class="fineprint"></p>
         <div class="input-actions">
           <label class="check">
+            <input type="checkbox" id="opt-headings" />
+            Include headings
+          </label>
+          <label class="check">
             <input type="checkbox" id="opt-link" />
             Create a public Pangram link
           </label>
@@ -73,6 +77,25 @@
           <div id="bar-ai" class="bar-part bar-part--ai"></div>
           <div id="bar-assisted" class="bar-part bar-part--assisted"></div>
           <div id="bar-human" class="bar-part bar-part--human"></div>
+        </div>
+      </section>
+
+      <section id="revise-section">
+        <h2 class="section-head">Paragraphs to revise</h2>
+        <p id="revise-summary" class="note note--lead"></p>
+        <div class="table-scroll">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th class="num">Line</th>
+                <th>Paragraph</th>
+                <th>Label</th>
+                <th class="num">AI score</th>
+                <th class="num">Words</th>
+              </tr>
+            </thead>
+            <tbody id="revise-tbody"></tbody>
+          </table>
         </div>
       </section>
 

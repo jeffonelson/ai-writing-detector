@@ -186,6 +186,13 @@ body {
     color: var(--muted);
 }
 
+.note--lead {
+    margin: 0 0 0.75rem;
+    font-size: 0.95rem;
+    color: var(--ink-2);
+    max-width: 44rem;
+}
+
 /* --- INPUT --- */
 .drop-zone {
     position: relative;
@@ -443,6 +450,12 @@ body {
 .grid th:first-child,
 .grid td:first-child {
     padding-left: 0;
+}
+
+.grid th.num:first-child,
+.grid td.num:first-child {
+    width: 3rem;
+    padding-right: 1rem;
 }
 
 .grid .num {

@@ -3,7 +3,15 @@
  * and show which passages read as AI-generated, AI-assisted or human.
  */
 
-import { marked } from 'marked';
+import {
+    billableUnits,
+    countWords,
+    describeRemoved,
+    labelClass,
+    locateWindows,
+    prepareDocument,
+    scoreBlocks,
+} from './prepare.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,6 +26,10 @@ const els = {
     textInput: $('text-input'),
     inputStats: $('input-stats'),
     optLink: $('opt-link'),
+    optHeadings: $('opt-headings'),
+    reviseSection: $('revise-section'),
+    reviseSummary: $('revise-summary'),
+    reviseTbody: $('revise-tbody'),
     btnAnalyze: $('btn-analyze'),
     btnClear: $('btn-clear'),
     results: $('results'),
@@ -38,9 +50,9 @@ const els = {
 
 const MODEL_KEY = 'pangram_model';
 const LINK_KEY = 'pangram_public_link';
+const HEADINGS_KEY = 'pangram_include_headings';
 const FLAGGED_KEY = 'pangram_flagged_phrases';
 const FALLBACK_MODELS = ['pangram-4'];
-const WORDS_PER_UNIT = 100; // Pangram 4 bills per started 100-word block
 const MAX_FLAGGED = 200;
 const IDLE_HEADLINE = 'Paste some writing to see how much of it reads as AI.';
 
@@ -112,51 +124,24 @@ async function api(path, options) {
 
 // ─── Text preparation ────────────────────────────────────────────
 
-function countWords(text) {
-    const trimmed = text.trim();
-    return trimmed ? trimmed.split(/\s+/).length : 0;
-}
-
-function looksLikeMarkdown(text) {
-    return /^#{1,6}\s+\S|^```|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^)\s]+\)/m.test(text);
-}
-
-function stripMarkdown(md) {
-    // Keep a blank line between blocks so paragraphs survive as paragraphs.
-    const html = marked
-        .parse(md, { async: false })
-        .replace(/<\/(p|h[1-6]|pre|ul|ol|blockquote|table)>/g, '$&\n');
-    // DOMParser builds an inert document: scripts don't run and images don't load.
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    return (doc.body.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-/** The exact text that gets sent to Pangram, plus whether Markdown was removed. */
-function prepareText(raw) {
-    const trimmed = raw.trim();
-    if (trimmed && looksLikeMarkdown(trimmed)) {
-        try {
-            return { text: stripMarkdown(trimmed), stripped: true };
-        } catch {
-            // fall through and send the text as written
-        }
-    }
-    return { text: trimmed, stripped: false };
+/** The prose that gets sent to Pangram, with a map back to the source paragraphs. */
+function prepare() {
+    return prepareDocument(els.textInput.value, { headings: els.optHeadings.checked });
 }
 
 function updateInputStats() {
-    const { text, stripped } = prepareText(els.textInput.value);
-    const words = countWords(text);
+    const prepared = prepare();
+    const { words } = prepared;
     els.btnAnalyze.disabled = words === 0 || isAnalyzing;
 
     if (words === 0) {
-        els.inputStats.textContent = 'Markdown formatting is removed before analysis.';
+        els.inputStats.textContent = 'Code, images, tables and links are left out before analysis.';
         return;
     }
-    const units = Math.max(1, Math.ceil(words / WORDS_PER_UNIT));
+    const leftOut = describeRemoved(prepared.removed);
     els.inputStats.textContent =
-        `${plural(words, 'word')} · about ${plural(units, 'billable unit')}` +
-        (stripped ? ' · Markdown removed' : '');
+        `${plural(words, 'word')} · about ${plural(billableUnits(words), 'billable unit')}` +
+        (leftOut ? ` · left out ${leftOut}` : '');
 }
 
 let statsTimer = 0;
@@ -225,8 +210,8 @@ function setHero(state, headline, dek = '', fineprint = []) {
 
 async function analyzeText() {
     if (isAnalyzing) return;
-    const { text } = prepareText(els.textInput.value);
-    const words = countWords(text);
+    const prepared = prepare();
+    const { text, words } = prepared;
     if (!words) return;
 
     const model = els.modelPicker.value;
@@ -249,7 +234,7 @@ async function analyzeText() {
                 public_dashboard_link: els.optLink.checked,
             }),
         });
-        renderResults(data, text, model);
+        renderResults(data, prepared, model);
 
         // Report what the scan actually cost, when the balance shows it.
         const balanceAfter = await refreshAccount();
@@ -269,42 +254,8 @@ async function analyzeText() {
 
 // ─── Results ─────────────────────────────────────────────────────
 
-function labelClass(label) {
-    const l = String(label || '').toLowerCase();
-    if (l.includes('assist') || l.includes('mixed')) return 'assisted';
-    if (l.includes('ai')) return 'ai';
-    return 'human';
-}
-
 function isHumanized(w) {
     return w.is_humanized === true;
-}
-
-/** Windows with usable offsets, each tagged with its position in the API response. */
-function usableWindows(data) {
-    const windows = Array.isArray(data.windows) ? data.windows : [];
-    return windows
-        .map((w, index) => ({ ...w, index }))
-        .filter((w) => w && typeof w === 'object');
-}
-
-/**
- * Pangram's offsets may count Unicode code points while JS strings count
- * UTF-16 units. Pick whichever reading reproduces the window texts.
- */
-function makeSlicer(text, windows) {
-    const points = Array.from(text);
-    const byUnit = { length: text.length, slice: (s, e) => text.slice(s, e) };
-    if (points.length === text.length) return byUnit;
-
-    const byPoint = { length: points.length, slice: (s, e) => points.slice(s, e).join('') };
-    let unitHits = 0;
-    let pointHits = 0;
-    for (const w of windows) {
-        if (byUnit.slice(w.start_index, w.end_index) === w.text) unitHits++;
-        if (byPoint.slice(w.start_index, w.end_index) === w.text) pointHits++;
-    }
-    return pointHits > unitHits ? byPoint : byUnit;
 }
 
 function windowTitle(w) {
@@ -315,28 +266,48 @@ function windowTitle(w) {
 }
 
 function renderAnnotated(text, windows) {
-    const spans = windows
-        .filter((w) => Number.isInteger(w.start_index) && Number.isInteger(w.end_index))
-        .sort((a, b) => a.start_index - b.start_index);
-    const slicer = makeSlicer(text, spans);
+    const spans = [...windows].sort((a, b) => a.start - b.start);
 
     let html = '';
     let cursor = 0;
     for (const w of spans) {
         // Windows can overlap; only draw the part that hasn't been drawn yet.
-        const start = Math.max(w.start_index, cursor);
-        const end = Math.min(w.end_index, slicer.length);
-        if (end <= start) continue;
+        const start = Math.max(w.start, cursor);
+        if (w.end <= start) continue;
 
-        if (start > cursor) html += escapeHtml(slicer.slice(cursor, start));
+        if (start > cursor) html += escapeHtml(text.slice(cursor, start));
         html +=
             `<span class="seg seg--${labelClass(w.label)}" data-index="${w.index}" ` +
-            `title="${escapeHtml(windowTitle(w))}">${escapeHtml(slicer.slice(start, end))}</span>`;
-        cursor = end;
+            `title="${escapeHtml(windowTitle(w))}">${escapeHtml(text.slice(start, w.end))}</span>`;
+        cursor = w.end;
     }
-    if (cursor < slicer.length) html += escapeHtml(slicer.slice(cursor, slicer.length));
+    if (cursor < text.length) html += escapeHtml(text.slice(cursor));
 
     els.annotated.innerHTML = html;
+}
+
+/** Flagged paragraphs of the original document, by source line. */
+function renderRevise(blocks) {
+    const flagged = blocks.filter((b) => b.flagged);
+    els.reviseSummary.textContent = flagged.length
+        ? `${flagged.length.toLocaleString()} of ${plural(blocks.length, 'paragraph')} flagged. ` +
+          'Pangram judges text in larger segments, so neighbouring paragraphs often share a verdict.'
+        : `None of the ${plural(blocks.length, 'paragraph')} were flagged.`;
+
+    els.reviseTbody.innerHTML = flagged
+        .map((b) => {
+            const excerpt = b.text.length > 180 ? `${b.text.slice(0, 180).trimEnd()}…` : b.text;
+            return `
+      <tr data-index="${b.window ?? ''}">
+        <td class="num faint">${b.line}</td>
+        <td class="excerpt">${escapeHtml(excerpt)}</td>
+        <td><span class="label label--${b.verdict}">${escapeHtml(b.label || 'Flagged')}${b.humanized ? ' · humanized' : ''}</span></td>
+        <td class="num">${b.ai_score === null ? '—' : pct(b.ai_score)}</td>
+        <td class="num">${b.words.toLocaleString()}</td>
+      </tr>`;
+        })
+        .join('');
+    els.reviseTbody.closest('.table-scroll').hidden = flagged.length === 0;
 }
 
 function renderSegments(windows) {
@@ -378,10 +349,10 @@ function renderSegments(windows) {
         .join('');
 }
 
-function renderResults(data, sentText, model) {
-    const windows = usableWindows(data);
+function renderResults(data, prepared, model) {
     // Pangram may normalize the input; window offsets refer to the text it returns.
-    const text = typeof data.text === 'string' && data.text ? data.text : sentText;
+    const text = typeof data.text === 'string' && data.text ? data.text : prepared.text;
+    const windows = locateWindows(text, data.windows);
     const version = data.version ? `Pangram ${data.version}` : modelName(model);
 
     const ai = Number(data.fraction_ai) || 0;
@@ -419,6 +390,7 @@ function renderResults(data, sentText, model) {
         `${pct(ai)} AI-generated, ${pct(assisted)} AI-assisted, ${pct(human)} human`,
     );
 
+    renderRevise(scoreBlocks(prepared, data));
     renderAnnotated(text, windows);
     renderSegments(windows);
     els.results.hidden = false;
@@ -427,6 +399,7 @@ function renderResults(data, sentText, model) {
 }
 
 function activate(index, scrollTarget) {
+    if (index === undefined || index === '') return;
     for (const el of document.querySelectorAll('.seg.active, #segment-tbody tr.active')) {
         el.classList.remove('active');
     }
@@ -570,6 +543,7 @@ function setupDragDrop() {
 function init() {
     setHero('idle', IDLE_HEADLINE);
     els.optLink.checked = store.get(LINK_KEY, false) === true;
+    els.optHeadings.checked = store.get(HEADINGS_KEY, false) === true;
     renderFlagged();
     updateInputStats();
     setupDragDrop();
@@ -578,6 +552,14 @@ function init() {
     els.btnAnalyze.addEventListener('click', analyzeText);
     els.modelPicker.addEventListener('change', () => store.set(MODEL_KEY, els.modelPicker.value));
     els.optLink.addEventListener('change', () => store.set(LINK_KEY, els.optLink.checked));
+    els.optHeadings.addEventListener('change', () => {
+        store.set(HEADINGS_KEY, els.optHeadings.checked);
+        updateInputStats();
+    });
+    els.reviseTbody.addEventListener('click', (e) => {
+        const row = e.target.closest('tr[data-index]');
+        if (row) activate(row.dataset.index, 'seg');
+    });
 
     els.btnClear.addEventListener('click', () => {
         if (isAnalyzing) return;
